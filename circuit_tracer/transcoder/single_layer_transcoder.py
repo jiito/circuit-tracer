@@ -12,7 +12,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
 
-from circuit_tracer.transcoder.activation_functions import JumpReLU
+from circuit_tracer.transcoder.activation_functions import JumpReLU, PerLayerTopK
 from circuit_tracer.utils import get_default_device
 
 
@@ -465,11 +465,15 @@ def load_relu_transcoder(
     d_model = param_dict["b_dec"].shape[0]
 
     assert param_dict.get("log_thresholds") is None
-    activation_function = (
-        JumpReLU(param_dict["activation_function.threshold"], 0.1)
-        if "activation_function.threshold" in param_dict
-        else F.relu
-    )
+    if "activation_function.threshold" in param_dict:
+        activation_function = JumpReLU(param_dict["activation_function.threshold"], 0.1)
+    elif "activation_function.k" in param_dict:
+        activation_function = PerLayerTopK(param_dict["activation_function.k"])
+        # NOTE: we can't keep this around or the loading complains...
+        # TODO: move this to the overal config
+        del param_dict["activation_function.k"]
+    else:
+        activation_function = F.relu
     with torch.device("meta"):
         transcoder = SingleLayerTranscoder(
             d_model,
