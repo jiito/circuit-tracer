@@ -8,7 +8,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file, load_file
 from torch.nn import functional as F
 
-from circuit_tracer.transcoder.activation_functions import JumpReLU, TopK
+from circuit_tracer.transcoder.activation_functions import JumpReLU, PerLayerTopK, TopK
 from circuit_tracer.utils import get_default_device
 
 
@@ -62,6 +62,7 @@ class CrossLayerTranscoder(torch.nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype = torch.bfloat16,
         clt_path: str | None = None,
+        k: int | None = None,
     ):
         super().__init__()
 
@@ -84,8 +85,9 @@ class CrossLayerTranscoder(torch.nn.Module):
             self.activation_function = JumpReLU(
                 torch.zeros(n_layers, 1, d_transcoder, device=device, dtype=dtype)
             )
-        elif activation_function == "topk":
-            raise ValueError("TopK activation function is not supported by circuit-tracer.")
+        elif activation_function == "per_layer_topk":
+            assert k is not None, "k must be provided for topk activation function"
+            self.activation_function = PerLayerTopK(k=k)
         elif activation_function == "relu":
             self.activation_function = F.relu
         else:
@@ -424,7 +426,20 @@ def load_clt(
     d_transcoder = state_dict["b_enc"].shape[1]
     d_model = state_dict["b_dec"].shape[1]
 
-    act_fn = "jump_relu" if "activation_function.threshold" in state_dict else "topk" if "activation_function.k" in state_dict else "relu"
+    act_fn = (
+        "jump_relu"
+        if "activation_function.threshold" in state_dict
+        else "per_layer_topk"
+        if "activation_function.k" in state_dict
+        else "relu"
+    )
+
+    if act_fn == "per_layer_topk":
+        k_tensor = state_dict.get("activation_function.k")
+        assert k_tensor is not None, "k must be provided for per_layer_topk activation function"
+        k = int(k_tensor.item())
+        # NOTE: we use the state dict to load this, but don't want to load it as a parameter...
+        del state_dict["activation_function.k"]
 
     # Create instance and load state dict
     with torch.device("meta"):
@@ -441,6 +456,7 @@ def load_clt(
             scan=scan,
             dtype=dtype,
             clt_path=clt_path,
+            k=k,
         )
 
     instance.load_state_dict(state_dict, assign=True)
@@ -565,6 +581,7 @@ def _load_state_dict(
         d_transcoder, d_model = f.get_slice("W_enc_0").get_shape()
         has_threshold = "threshold_0" in f.keys()
         has_k = "k_0" in f.keys()
+        k = f.get_tensor("k_0")
 
     # Preallocate tensors
     b_dec = torch.zeros(n_layers, d_model, device=device, dtype=dtype)
@@ -577,11 +594,8 @@ def _load_state_dict(
             n_layers, 1, d_transcoder, device=device, dtype=dtype
         )
 
-    # TODO: setup state dict accurately
     if has_k:
-        state_dict["activation_function.k"] = torch.zeros(
-            n_layers, device=device, dtype=dtype
-        )
+        state_dict["activation_function.k"] = k
 
     # Only create W_enc if not lazy
     if not lazy_encoder:

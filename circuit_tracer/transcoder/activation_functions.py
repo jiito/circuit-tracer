@@ -54,9 +54,28 @@ class TopK(nn.Module):
     def __init__(self, k: int):
         super().__init__()
         self.k = k
+        self.relu = torch.nn.ReLU()
 
     def forward(self, x: torch.Tensor):
         _, indices = torch.topk(x, k=self.k, dim=-1)
         gate = torch.zeros_like(x)
         gate.scatter_(dim=-1, index=indices, value=1)
         return x * gate.to(x.dtype)
+
+
+class PerLayerTopK(TopK):
+    @torch.no_grad()
+    def _inference_forward(self, features: torch.Tensor, layer: int) -> torch.Tensor:
+        return self._training_forward(features)
+
+    def _training_forward(self, features: torch.Tensor) -> torch.Tensor:
+        # b, l, d = features.shape does not work with nnsight because tuple extraction isn't implemented yet
+        batch_size, n_layers, d_features = features.shape
+        assert self.k <= d_features
+
+        topk_features = torch.zeros_like(features)
+        topk_vals, topk_idxs = torch.topk(features, self.k, dim=-1, sorted=False)
+        topk_vals = self.relu(topk_vals)  # make sure that features are always positive
+        topk_features.scatter_(dim=-1, index=topk_idxs, src=topk_vals)
+
+        return topk_features
