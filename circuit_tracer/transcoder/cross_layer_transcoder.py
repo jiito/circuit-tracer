@@ -8,7 +8,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file, load_file
 from torch.nn import functional as F
 
-from circuit_tracer.transcoder.activation_functions import JumpReLU
+from circuit_tracer.transcoder.activation_functions import JumpReLU, TopK
 from circuit_tracer.utils import get_default_device
 
 
@@ -84,6 +84,8 @@ class CrossLayerTranscoder(torch.nn.Module):
             self.activation_function = JumpReLU(
                 torch.zeros(n_layers, 1, d_transcoder, device=device, dtype=dtype)
             )
+        elif activation_function == "topk":
+            raise ValueError("TopK activation function is not supported by circuit-tracer.")
         elif activation_function == "relu":
             self.activation_function = F.relu
         else:
@@ -422,7 +424,7 @@ def load_clt(
     d_transcoder = state_dict["b_enc"].shape[1]
     d_model = state_dict["b_dec"].shape[1]
 
-    act_fn = "jump_relu" if "activation_function.threshold" in state_dict else "relu"
+    act_fn = "jump_relu" if "activation_function.threshold" in state_dict else "topk" if "activation_function.k" in state_dict else "relu"
 
     # Create instance and load state dict
     with torch.device("meta"):
@@ -562,6 +564,7 @@ def _load_state_dict(
     with safe_open(os.path.join(clt_path, dec_file), framework="pt", device=device.type) as f:
         d_transcoder, d_model = f.get_slice("W_enc_0").get_shape()
         has_threshold = "threshold_0" in f.keys()
+        has_k = "k_0" in f.keys()
 
     # Preallocate tensors
     b_dec = torch.zeros(n_layers, d_model, device=device, dtype=dtype)
@@ -572,6 +575,12 @@ def _load_state_dict(
     if has_threshold:
         state_dict["activation_function.threshold"] = torch.zeros(
             n_layers, 1, d_transcoder, device=device, dtype=dtype
+        )
+
+    # TODO: setup state dict accurately
+    if has_k:
+        state_dict["activation_function.k"] = torch.zeros(
+            n_layers, device=device, dtype=dtype
         )
 
     # Only create W_enc if not lazy
